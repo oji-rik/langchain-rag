@@ -1,0 +1,27 @@
+# Core LangChain dependencies
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.10
+
+# Azure OpenAI and OpenAI
+requests>=2.31.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# RAG system dependencies
+pypdf>=3.0.0
+faiss-cpu>=1.7.4
+tiktoken>=0.5.0
+tqdm>=4.65.0
+
+# Additional document loaders
+unstructured>=0.10.0
+python-docx>=0.8.11
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+
+# System utilities
+psutil>=5.9.0
+
+# Testing (optional)
+pytest>=7.0.0
