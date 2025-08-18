@@ -284,6 +284,71 @@ class PDFRAGSystem:
         """
         self.load_document(pdf_path, "pdf")
     
+    def add_document(self, document_path: str, doc_type: str = "auto") -> None:
+        """
+        既存のRAGシステムに新しい文書を追加
+        
+        Args:
+            document_path: 追加する文書ファイルのパスまたはURL
+            doc_type: 文書タイプ ("auto", "pdf", "pptx", "docx", "web", "txt")
+        """
+        if not self.vectorstore:
+            logger.error("ベースとなるベクトルストアが存在しません。まず初期文書を読み込んでください。")
+            raise ValueError("まず初期文書を読み込んでから追加してください（load_document()を先に実行）")
+        
+        logger.info(f"新しい文書を追加中: {document_path}")
+        
+        # 文書タイプの自動判定
+        if doc_type == "auto":
+            doc_type = self._detect_document_type(document_path)
+        
+        logger.info(f"文書を読み込み中: {document_path} (タイプ: {doc_type})")
+        
+        # 新しい文書を読み込み
+        loader = self._get_loader(document_path, doc_type)
+        new_documents = loader.load()
+        
+        logger.info(f"{len(new_documents)}ページ/セクションの新しい文書を読み込みました")
+        
+        # テキストを分割
+        new_texts = self.text_splitter.split_documents(new_documents)
+        logger.info(f"新しいテキストを{len(new_texts)}チャンクに分割しました")
+        
+        # 新しいベクトルストアを構築
+        logger.info("新しい文書のベクトル埋め込みを生成中...")
+        new_vectorstore = self._build_vectorstore_with_batches(new_texts)
+        
+        # 既存のベクトルストアにマージ
+        logger.info("既存のベクトルストアに新しい文書を統合中...")
+        self.vectorstore.merge_from(new_vectorstore)
+        
+        # 文書リストを更新
+        self.documents.extend(new_documents)
+        
+        # QAチェーンを再初期化（必要に応じて）
+        self.qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            chain_type="stuff",
+            retriever=self.vectorstore.as_retriever(
+                search_kwargs={"k": 5}  # 文書が増えたのでk=5に変更
+            ),
+            return_source_documents=True
+        )
+        
+        logger.info(f"文書の追加が完了しました。総文書数: {len(self.documents)}")
+        
+        # 更新後の情報を返す
+        total_chars = sum(len(doc.page_content) for doc in self.documents)
+        total_chunks = len(self.vectorstore.index_to_docstore_id) if self.vectorstore else 0
+        
+        return {
+            "added_pages": len(new_documents),
+            "added_chunks": len(new_texts),
+            "total_pages": len(self.documents),
+            "total_chunks": total_chunks,
+            "total_characters": total_chars
+        }
+    
     def ask(self, question: str) -> dict:
         """
         質問に対して回答を生成

@@ -76,11 +76,74 @@ python integrated_agent.py
 └── LLM (GPT-4.1) - 自動判断・ルーティング
 ```
 
-## ファイル構成
+## ファイル構成と機能説明
 
-- `integrated_agent.py`: メインシステム
-- `rag_tool.py`: RAG機能のToolラッパー
-- `pdf_rag_core.py`: RAGコア機能
-- `csharp_tools.py`: C#関数ツール
-- `requirements.txt`: 依存関係
-- `.env`: Azure設定
+### 🚀 メインプログラム
+- **`integrated_agent.py`** - **統合システムの心臓部**
+  - 全機能を統合したメインプログラム
+  - LangChain Agentが質問内容を自動判断
+  - RAG検索・文書追加・測定実行を適切にルーティング
+  - **実行方法**: `python integrated_agent.py`
+
+### 📚 RAG（文書検索）システム
+- **`pdf_rag_core.py`** - **RAGエンジン本体**
+  - PDF/Word/PowerPointからテキストを抽出
+  - 文書を1000文字ずつのチャンクに自動分割
+  - Azure OpenAIでベクトル化（意味をベクトルで表現）
+  - FAISSで高速検索（類似度でマッチング）
+  - **初心者向け説明**: 「文書の中身を理解して質問に答えるAI」
+
+- **`rag_tool.py`** - **RAG機能をAgentツール化**
+  - `DocumentationSearchTool`: 文書検索機能
+  - `DocumentAddTool`: チャット中に新文書追加機能
+  - LangChain AgentがRAGを簡単に呼び出せる形に変換
+  - **初心者向け説明**: 「RAGをツールとして使えるようにする変換器」
+
+### ⚙️ 測定関数システム
+- **`csharp_tools.py`** - **C#サーバーとの橋渡し**
+  - C#で書かれた測定関数（距離、角度など）をPythonから呼び出し
+  - HTTPリクエストで関数実行をリクエスト
+  - 結果をLangChain Agentが理解できる形で返却
+  - **初心者向け説明**: 「計算専用サーバーとチャットシステムをつなぐ橋」
+
+### 🔧 設定・依存関係
+- **`requirements.txt`** - **必要なライブラリ一覧**
+  - LangChain: AI Agent機能
+  - FAISS: ベクトル検索エンジン 
+  - pypdf/python-docx: ファイル読み込み
+  - requests: HTTP通信
+  - **初心者向け説明**: 「このシステムが動くのに必要な材料リスト」
+
+- **`.env`** - **秘密の設定ファイル**
+  - Azure OpenAI APIキー（絶対秘密）
+  - エンドポイントURL（接続先情報）
+  - デプロイメント名（使用するAIモデル名）
+  - **初心者向け説明**: 「AIサービスに接続するための身分証明書」
+
+### 📖 ドキュメント
+- **`README.md`** - **このファイル（システム説明書）**
+- **`LANGCHAIN_RAG_BENEFITS.md`** - **技術選択の理由**
+- **`RAG_ARCHITECTURE_NOTES.md`** - **RAGの仕組み詳細**
+
+## 🔍 RAG初心者向け補足説明
+
+### RAG（Retrieval-Augmented Generation）とは？
+1. **Retrieval（検索）**: 関連する文書を見つける
+2. **Augmented（拡張）**: 見つけた文書を参考資料として追加
+3. **Generation（生成）**: 参考資料を元に回答を生成
+
+### このシステムでのRAGの流れ
+```
+質問「角度測定の方法は？」
+↓
+1. 質問をベクトル化（数値に変換）
+2. 似たベクトルを文書から検索
+3. 関連部分を抽出（例：「AngleMeasurement関数で...」）
+4. GPT-4に「この資料を参考に回答して」と指示
+5. 自然な日本語で回答生成
+```
+
+### なぜRAGが必要？
+- **最新情報**: GPTの学習データにない最新マニュアルも対応
+- **専門知識**: 会社固有の測定器仕様書も理解
+- **正確性**: 根拠となる文書を明示して回答

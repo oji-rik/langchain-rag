@@ -17,6 +17,8 @@ tqdm>=4.65.0
 # Additional document loaders
 unstructured>=0.10.0
 python-docx>=0.8.11
+docx2txt>=0.8
+python-pptx>=0.6.21
 beautifulsoup4>=4.12.0
 selenium>=4.15.0
 

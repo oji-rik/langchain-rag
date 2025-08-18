@@ -6,7 +6,7 @@ from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
 from csharp_tools import create_tools_from_csharp_server, test_csharp_server_connection
-from rag_tool import create_rag_tool
+from rag_tool import create_rag_tool, create_document_add_tool
 from dotenv import load_dotenv
 import logging
 
@@ -76,8 +76,12 @@ def create_integrated_agent(
     )
     print("✓ RAG documentation system ready")
     
+    # 文書追加ツールを作成
+    document_add_tool = create_document_add_tool(rag_tool.rag_system)
+    print("✓ Document addition tool ready")
+    
     # 全ツールを統合
-    all_tools = csharp_tools + [rag_tool]
+    all_tools = csharp_tools + [rag_tool, document_add_tool]
     print(f"✓ Total tools available: {len(all_tools)}")
     
     # メモリを作成（会話履歴管理）
@@ -91,12 +95,14 @@ def create_integrated_agent(
         ("system", """You are an intelligent measurement system assistant. You have access to two types of capabilities:
 
 1. **Documentation Search**: Use the 'documentation_search' tool to find information about measurement functions, features, and usage instructions.
-2. **Function Execution**: Use the available measurement tools to perform actual calculations and measurements.
+2. **Document Addition**: Use the 'add_document' tool when users want to add new documents to the knowledge base.
+3. **Function Execution**: Use the available measurement tools to perform actual calculations and measurements.
 
 Guidelines:
 - When users ask about "what functions are available", "how to use", or "which feature to use" → Use documentation_search
+- When users want to "add document", "load new manual", "read another file" → Use add_document (ask for file path)
 - When users ask to "measure", "calculate", or "execute" something → Use the appropriate measurement function
-- You can use both in sequence: first search for information, then execute the function
+- You can use tools in sequence: search information → add documents → execute functions
 - Always provide clear, helpful responses in the user's language (Japanese or English)
 - If unsure about which tool to use, try documentation_search first
 
@@ -127,6 +133,111 @@ Available measurement functions will be dynamically loaded from the C# server.""
     return agent_executor
 
 
+def create_integrated_agent_without_docs(
+    azure_endpoint: str,
+    azure_deployment: str,
+    embedding_deployment: str,
+    api_key: str,
+    api_version: str = "2024-12-01-preview",
+    csharp_server_url: str = "http://localhost:8080"
+) -> AgentExecutor:
+    """
+    初期文書なしでFunction Calling のみの統合エージェントを作成
+    """
+    
+    print("=== 統合測定システム初期化（文書なしモード） ===")
+    
+    # C#サーバー接続をテスト
+    print(f"Testing connection to C# server at {csharp_server_url}...")
+    if not test_csharp_server_connection(csharp_server_url):
+        raise Exception(f"Cannot connect to C# server at {csharp_server_url}. Make sure the server is running.")
+    print("✓ C# server connection successful")
+    
+    # Azure OpenAI client を作成
+    llm = AzureChatOpenAI(
+        azure_endpoint=azure_endpoint,
+        azure_deployment=azure_deployment,
+        api_key=api_key,
+        api_version=api_version,
+        temperature=0.7
+    )
+    print("✓ Azure OpenAI client created")
+    
+    # C#関数ツールを作成
+    print("Fetching C# function tools...")
+    csharp_tools = create_tools_from_csharp_server(csharp_server_url)
+    print(f"✓ Loaded {len(csharp_tools)} C# function tools:")
+    for tool in csharp_tools:
+        print(f"  - {tool.name}: {tool.description}")
+    
+    # 文書追加専用ツールを作成（空のRAGシステム用）
+    print("Initializing document addition capability...")
+    
+    # 空のRAGシステムを作成（後で文書追加用）
+    from pdf_rag_core import PDFRAGSystem
+    empty_rag_system = PDFRAGSystem(
+        azure_endpoint=azure_endpoint,
+        azure_deployment=azure_deployment,
+        embedding_deployment=embedding_deployment,
+        api_key=api_key,
+        api_version=api_version
+    )
+    
+    # 文書追加ツールのみ作成
+    document_add_tool = create_document_add_tool(empty_rag_system)
+    print("✓ Document addition capability ready")
+    
+    # ツールリスト（検索ツールは含まない）
+    all_tools = csharp_tools + [document_add_tool]
+    print(f"✓ Total tools available: {len(all_tools)}")
+    
+    # メモリを作成
+    memory = ConversationBufferMemory(
+        return_messages=True,
+        memory_key="chat_history"
+    )
+    
+    # プロンプトテンプレートを作成
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an intelligent measurement system assistant. You currently have access to:
+
+1. **Function Execution**: Use the available measurement tools to perform actual calculations and measurements.
+2. **Document Addition**: Use the 'add_document' tool when users want to add documents to create a knowledge base.
+
+Guidelines:
+- When users want to "add document", "load manual", "read file" → Use add_document (ask for file path)
+- When users ask to "measure", "calculate", or "execute" something → Use the appropriate measurement function
+- After documents are added, inform users they can search for information using documentation_search
+- Always provide clear, helpful responses in the user's language (Japanese or English)
+- If users ask about documentation before adding any, suggest adding documents first
+
+Available measurement functions will be dynamically loaded from the C# server."""),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+    
+    # Agentを作成
+    agent = create_openai_functions_agent(
+        llm=llm,
+        tools=all_tools,
+        prompt=prompt
+    )
+    
+    # Agent Executorを作成
+    agent_executor = AgentExecutor(
+        agent=agent,
+        tools=all_tools,
+        memory=memory,
+        verbose=True,
+        max_iterations=15,
+        return_intermediate_steps=True
+    )
+    
+    print("✓ Integrated agent created successfully (without initial documents)")
+    return agent_executor
+
+
 def main():
     """統合システムのメイン関数"""
     
@@ -151,37 +262,57 @@ def main():
         sys.exit(1)
     
     # ドキュメントパスの入力
-    documentation_path = input("事前読み込みするドキュメントのパス（PDF/PowerPoint/Word/URL）を入力してください: ").strip()
+    documentation_path = input("事前読み込みするドキュメントのパス（PDF/PowerPoint/Word/URL）を入力してください\n（不要な場合はEnterキーを押してください）: ").strip()
     
     if not documentation_path:
-        print("ドキュメントパスが指定されていません。RAG機能なしで開始します...")
-        # RAG機能なしでの実装も可能だが、ここでは簡略化
-        sys.exit(1)
+        print("初期文書の読み込みをスキップします。後でチャット中に文書を追加できます。")
+        print("※ 文書検索機能を使うには、まず'新しい文書を追加したい'と言って文書を追加してください。")
+        documentation_path = None
     
     try:
         # 統合エージェントを作成
         print("\n統合測定システムを初期化中...")
-        agent_executor = create_integrated_agent(
-            azure_endpoint=AZURE_ENDPOINT,
-            azure_deployment=AZURE_DEPLOYMENT,
-            embedding_deployment=EMBEDDING_DEPLOYMENT,
-            api_key=API_KEY,
-            documentation_path=documentation_path,
-            csharp_server_url=CSHARP_SERVER_URL
-        )
+        if documentation_path:
+            agent_executor = create_integrated_agent(
+                azure_endpoint=AZURE_ENDPOINT,
+                azure_deployment=AZURE_DEPLOYMENT,
+                embedding_deployment=EMBEDDING_DEPLOYMENT,
+                api_key=API_KEY,
+                documentation_path=documentation_path,
+                csharp_server_url=CSHARP_SERVER_URL
+            )
+        else:
+            agent_executor = create_integrated_agent_without_docs(
+                azure_endpoint=AZURE_ENDPOINT,
+                azure_deployment=AZURE_DEPLOYMENT,
+                embedding_deployment=EMBEDDING_DEPLOYMENT,
+                api_key=API_KEY,
+                csharp_server_url=CSHARP_SERVER_URL
+            )
         
         print("\n" + "="*80)
         print("🚀 統合測定システム Ready!")
         print("="*80)
         print("利用可能な機能:")
-        print("📚 ドキュメント検索: 機能の説明や使い方を調べる")
+        if not documentation_path:
+            print("※ 初期文書が読み込まれていません。文書検索を使うにはまず文書を追加してください。")
+        if documentation_path:
+            print("📚 ドキュメント検索: 機能の説明や使い方を調べる")
+        print("📄 文書追加: 新しいマニュアルやドキュメントを追加")
         print("⚙️  測定機能: 実際の計算や測定を実行")
-        print("🔄 複合処理: 機能を調べた後、実際に実行")
+        print("🔄 複合処理: 機能を調べて、文書を追加して、実際に実行")
         print("\n例:")
-        print("- '距離測定機能について教えて'")
+        if documentation_path:
+            print("- '距離測定機能について教えて'")
+        print("- '新しいマニュアルも追加したい'")
         print("- '点(1,1)と点(5,4)の距離を測って'") 
-        print("- '角度測定の機能はある？あれば実際に使って'")
-        print("\nType 'exit', 'quit', or '終了' to quit.")
+        if documentation_path:
+            print("- '角度測定の機能はある？あれば実際に使って'")
+            print("- 'もう一つ文書を読み込んでから、その機能で計算して'")
+        else:
+            print("- 'マニュアルPDFを読み込んでから、その機能で計算して'")
+
+        print("\nType 'q', 'exit', 'quit', or '終了' to quit.")
         print("="*80)
         
         # インタラクティブチャットループ
@@ -189,9 +320,13 @@ def main():
             try:
                 user_input = input("\n質問・指示: ").strip()
                 
-                if user_input.lower() in ['exit', 'quit', '終了', '']:
+                if user_input.lower() in ['exit', 'quit', '終了', 'q']:
                     print("システムを終了します。")
                     break
+                
+                if user_input == '':
+                    print("質問や指示を入力してください。終了するには 'q' または 'exit' と入力してください。")
+                    continue
                 
                 print("\n処理中...")
                 response = agent_executor.invoke({"input": user_input})

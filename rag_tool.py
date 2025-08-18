@@ -99,3 +99,69 @@ def create_rag_tool(
     
     # RAGツールを作成
     return DocumentationSearchTool(rag_system=rag_system)
+
+
+class DocumentAddTool(BaseTool):
+    """RAGシステムに新しい文書を動的に追加するツール"""
+    
+    name: str = "add_document" 
+    description: str = """Use this tool when user wants to add new documents to the RAG system. 
+    Perfect for requests like: 'Add another document', '新しい文書を追加したい', 'Read another manual', 
+    'Load more documentation'. Ask for the document path (file path or URL) and add it to the knowledge base."""
+    
+    rag_system: Optional[PDFRAGSystem] = Field(default=None, description="RAG system instance")
+    
+    def __init__(self, rag_system: PDFRAGSystem = None, **kwargs):
+        super().__init__(**kwargs)
+        self.rag_system = rag_system
+    
+    def _run(self, document_path: str) -> str:
+        """新しい文書をRAGシステムに追加"""
+        try:
+            if not self.rag_system:
+                return "RAGシステムが初期化されていません。"
+            
+            if not self.rag_system.vectorstore:
+                return "ベースとなる文書が読み込まれていません。まず初期文書を読み込んでください。"
+            
+            logger.info(f"DocumentAddTool で新しい文書を追加: {document_path}")
+            
+            # 文書を追加
+            result = self.rag_system.add_document(document_path)
+            
+            # 結果を整形
+            response = f"""📄 文書追加完了!
+            
+追加した文書:
+- ページ/セクション数: {result['added_pages']}
+- チャンク数: {result['added_chunks']}
+
+現在の知識ベース:
+- 総ページ数: {result['total_pages']}
+- 総チャンク数: {result['total_chunks']}
+- 総文字数: {result['total_characters']:,}
+
+新しい文書についても質問できるようになりました！"""
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"DocumentAddToolでエラー発生: {e}")
+            return f"文書追加中にエラーが発生しました: {str(e)}"
+    
+    async def _arun(self, document_path: str) -> str:
+        """非同期実行（非同期がサポートされていない場合は同期実行）"""
+        return self._run(document_path)
+
+
+def create_document_add_tool(rag_system: PDFRAGSystem) -> DocumentAddTool:
+    """
+    文書追加ツールを作成
+    
+    Args:
+        rag_system: 既存のRAGシステムインスタンス
+        
+    Returns:
+        文書追加ツール
+    """
+    return DocumentAddTool(rag_system=rag_system)
