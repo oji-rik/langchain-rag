@@ -6,7 +6,7 @@ from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
 from csharp_tools import create_tools_from_csharp_server, test_csharp_server_connection
-from rag_tool import create_rag_tool, create_document_add_tool
+from rag_tool import create_rag_tool, create_document_add_tool, create_empty_rag_system
 from dotenv import load_dotenv
 import logging
 
@@ -21,7 +21,8 @@ def create_integrated_agent(
     api_key: str,
     documentation_path: str,
     api_version: str = "2024-12-01-preview",
-    csharp_server_url: str = "http://localhost:8080"
+    csharp_server_url: str = "http://localhost:8080",
+    performance_mode: str = "insane"
 ) -> AgentExecutor:
     """
     RAG機能 + Function Calling を統合したLangChainエージェントを作成
@@ -34,6 +35,7 @@ def create_integrated_agent(
         documentation_path: 事前読み込みするドキュメントのパス
         api_version: Azure OpenAI API バージョン
         csharp_server_url: C#関数サーバーのURL
+        performance_mode: RAG処理の性能モード ("safe", "balanced", "fast", "turbo")
         
     Returns:
         設定済みAgentExecutorインスタンス
@@ -62,7 +64,11 @@ def create_integrated_agent(
     csharp_tools = create_tools_from_csharp_server(csharp_server_url)
     print(f"✓ Loaded {len(csharp_tools)} C# function tools:")
     for tool in csharp_tools:
-        print(f"  - {tool.name}: {tool.description}")
+        # descriptionの最初の行のみを抽出（詳細説明を除去）
+        short_desc = tool.description.split('\n')[0].split('。')[0]
+        if short_desc and not short_desc.endswith('。'):
+            short_desc += '。'
+        print(f"  - {tool.name}: {short_desc}")
     
     # RAGツールを作成（ドキュメント事前読み込み）
     print("Initializing RAG documentation system...")
@@ -72,7 +78,8 @@ def create_integrated_agent(
         embedding_deployment=embedding_deployment,
         api_key=api_key,
         documentation_path=documentation_path,
-        api_version=api_version
+        api_version=api_version,
+        performance_mode=performance_mode
     )
     print("✓ RAG documentation system ready")
     
@@ -139,10 +146,14 @@ def create_integrated_agent_without_docs(
     embedding_deployment: str,
     api_key: str,
     api_version: str = "2024-12-01-preview",
-    csharp_server_url: str = "http://localhost:8080"
+    csharp_server_url: str = "http://localhost:8080",
+    performance_mode: str = "insane"
 ) -> AgentExecutor:
     """
     初期文書なしでFunction Calling のみの統合エージェントを作成
+    
+    Args:
+        performance_mode: RAG処理の性能モード ("safe", "balanced", "fast", "turbo")
     """
     
     print("=== 統合測定システム初期化（文書なしモード） ===")
@@ -168,19 +179,23 @@ def create_integrated_agent_without_docs(
     csharp_tools = create_tools_from_csharp_server(csharp_server_url)
     print(f"✓ Loaded {len(csharp_tools)} C# function tools:")
     for tool in csharp_tools:
-        print(f"  - {tool.name}: {tool.description}")
+        # descriptionの最初の行のみを抽出（詳細説明を除去）
+        short_desc = tool.description.split('\n')[0].split('。')[0]
+        if short_desc and not short_desc.endswith('。'):
+            short_desc += '。'
+        print(f"  - {tool.name}: {short_desc}")
     
     # 文書追加専用ツールを作成（空のRAGシステム用）
     print("Initializing document addition capability...")
     
     # 空のRAGシステムを作成（後で文書追加用）
-    from pdf_rag_core import PDFRAGSystem
-    empty_rag_system = PDFRAGSystem(
+    empty_rag_system = create_empty_rag_system(
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
         embedding_deployment=embedding_deployment,
         api_key=api_key,
-        api_version=api_version
+        api_version=api_version,
+        performance_mode=performance_mode
     )
     
     # 文書追加ツールのみ作成
@@ -264,6 +279,27 @@ def main():
     # ドキュメントパスの入力
     documentation_path = input("事前読み込みするドキュメントのパス（PDF/PowerPoint/Word/URL）を入力してください\n（不要な場合はEnterキーを押してください）: ").strip()
     
+    # 性能モードの選択
+    print("\nRAGベクトル化の性能モードを選択してください:")
+    print("1. turbo    - 100バッチ, 0.1s間隔")
+    print("2. extreme  - 200バッチ, 0.1s間隔")
+    print("3. ultra    - 300バッチ, 0.1s間隔")
+    print("4. maximum  - 400バッチ, 0.1s間隔")
+    print("5. insane   - 500バッチ, 0.1s間隔 (推奨)")
+    
+    mode_choice = input("モード番号を選択 (1-5, デフォルト: 5): ").strip()
+    
+    mode_mapping = {
+        "1": "turbo",
+        "2": "extreme", 
+        "3": "ultra",
+        "4": "maximum",
+        "5": "insane"
+    }
+    
+    performance_mode = mode_mapping.get(mode_choice, "insane")
+    print(f"選択されたモード: {performance_mode}")
+    
     if not documentation_path:
         print("初期文書の読み込みをスキップします。後でチャット中に文書を追加できます。")
         print("※ 文書検索機能を使うには、まず'新しい文書を追加したい'と言って文書を追加してください。")
@@ -279,7 +315,8 @@ def main():
                 embedding_deployment=EMBEDDING_DEPLOYMENT,
                 api_key=API_KEY,
                 documentation_path=documentation_path,
-                csharp_server_url=CSHARP_SERVER_URL
+                csharp_server_url=CSHARP_SERVER_URL,
+                performance_mode=performance_mode
             )
         else:
             agent_executor = create_integrated_agent_without_docs(
@@ -287,11 +324,12 @@ def main():
                 azure_deployment=AZURE_DEPLOYMENT,
                 embedding_deployment=EMBEDDING_DEPLOYMENT,
                 api_key=API_KEY,
-                csharp_server_url=CSHARP_SERVER_URL
+                csharp_server_url=CSHARP_SERVER_URL,
+                performance_mode=performance_mode
             )
         
         print("\n" + "="*80)
-        print("🚀 統合測定システム Ready!")
+        print(f"🚀 統合測定システム Ready! （{performance_mode}モード）")
         print("="*80)
         print("利用可能な機能:")
         if not documentation_path:

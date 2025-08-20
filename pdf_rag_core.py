@@ -5,6 +5,7 @@ PDFファイルを読み込んで質問に答えるシステム
 import os
 import logging
 import time
+import hashlib
 from typing import List, Optional
 from pathlib import Path
 from urllib.parse import urlparse
@@ -44,7 +45,8 @@ class PDFRAGSystem:
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
         batch_size: int = 5,
-        batch_delay: float = 15.0
+        batch_delay: float = 15.0,
+        performance_mode: str = "insane"
     ):
         """
         RAGシステムの初期化
@@ -59,6 +61,7 @@ class PDFRAGSystem:
             chunk_overlap: チャンク間の重複サイズ
             batch_size: 埋め込み生成バッチサイズ
             batch_delay: バッチ間の待機時間（秒）
+            performance_mode: 性能モード ("safe", "balanced", "fast", "turbo")
         """
         load_dotenv()
         
@@ -79,8 +82,41 @@ class PDFRAGSystem:
             
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.batch_size = batch_size
-        self.batch_delay = batch_delay
+        
+        # 性能モードに基づいたバッチ設定の適用
+        optimized_settings = self._get_performance_settings(performance_mode)
+        # 性能モード設定を常に優先（パラメータで上書きされた場合のみそれを使用）
+        if batch_size == 5 and batch_delay == 15.0:
+            # デフォルト値の場合は性能モード設定を使用
+            self.batch_size = optimized_settings["batch_size"]
+            self.batch_delay = optimized_settings["batch_delay"]
+        else:
+            # 明示的に指定された場合はそれを使用
+            self.batch_size = batch_size
+            self.batch_delay = batch_delay
+        
+        self.performance_mode = performance_mode
+        self.adaptive_mode = optimized_settings["adaptive"]
+        
+        # 大容量バッチモードの初期設定
+        if performance_mode == "insane":
+            self.batch_size = 500
+            self.batch_delay = 0.1
+        elif performance_mode == "maximum":
+            self.batch_size = 400
+            self.batch_delay = 0.1
+        elif performance_mode == "ultra":
+            self.batch_size = 300
+            self.batch_delay = 0.1
+        elif performance_mode == "extreme":
+            self.batch_size = 200
+            self.batch_delay = 0.1
+        elif performance_mode == "turbo":
+            self.batch_size = 100
+            self.batch_delay = 0.1
+        
+        logger.info(f"🚀 RAGシステム初期化: {performance_mode}モード")
+        logger.info(f"   📊 設定: batch_size={self.batch_size}, delay={self.batch_delay}秒, 適応モード={'有効' if self.adaptive_mode else '無効'}")
         
         # 埋め込みモデルの初期化
         self.embeddings = AzureOpenAIEmbeddings(
@@ -110,16 +146,198 @@ class PDFRAGSystem:
         self.qa_chain = None
         self.documents = []
         
+        # 最適化管理用の変数
+        self.last_successful_delay = None    # 前回成功した遅延時間
+        self.error_occurred = False          # 429エラー発生フラグ
+        self.optimal_delay_found = False     # 最適遅延確定フラグ
+        
+        # キャッシュ管理用の変数
+        self.cache_dir = Path("./cache")
+        self.cache_dir.mkdir(exist_ok=True)  # キャッシュディレクトリを作成
+        self.current_document_info = None    # 現在の文書情報
+        
         logger.info("PDFRAGSystemが初期化されました")
+    
+    def _get_performance_settings(self, mode: str) -> dict:
+        """
+        性能モードに応じた設定を取得
+        
+        Args:
+            mode: 性能モード
+            
+        Returns:
+            最適化設定の辞書
+        """
+        settings = {
+            "turbo": {        # 100バッチサイズ
+                "batch_size": 100,
+                "batch_delay": 0.1,
+                "adaptive": True
+            },
+            "extreme": {      # 200バッチサイズ
+                "batch_size": 200,
+                "batch_delay": 0.1,
+                "adaptive": True
+            },
+            "ultra": {        # 300バッチサイズ
+                "batch_size": 300,
+                "batch_delay": 0.1,
+                "adaptive": True
+            },
+            "maximum": {      # 400バッチサイズ
+                "batch_size": 400,
+                "batch_delay": 0.1,
+                "adaptive": True
+            },
+            "insane": {       # 500バッチサイズ
+                "batch_size": 500,
+                "batch_delay": 0.1,
+                "adaptive": True
+            }
+        }
+        
+        if mode not in settings:
+            logger.warning(f"未知の性能モード: {mode}. デフォルトモードを使用します。")
+            mode = "insane"
+        
+        return settings[mode]
+    
+    def _get_file_cache_key(self, document_path: str) -> str:
+        """
+        ファイルのキャッシュキーを生成
+        
+        Args:
+            document_path: ファイルパスまたはURL
+            
+        Returns:
+            キャッシュキー（ハッシュ値）
+        """
+        # URLの場合はそのままハッシュ化
+        if document_path.startswith(('http://', 'https://')):
+            content = document_path
+        else:
+            # ローカルファイルの場合はパス+サイズ+更新時刻でハッシュ化
+            file_path = Path(document_path)
+            if not file_path.exists():
+                raise FileNotFoundError(f"ファイルが見つかりません: {document_path}")
+            
+            stat = file_path.stat()
+            content = f"{document_path}_{stat.st_size}_{stat.st_mtime}"
+        
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _get_document_name(self, document_path: str) -> str:
+        """
+        文書名を取得（表示用）
+        
+        Args:
+            document_path: ファイルパスまたはURL
+            
+        Returns:
+            文書名
+        """
+        if document_path.startswith(('http://', 'https://')):
+            return document_path
+        else:
+            return Path(document_path).name
+    
+    def _save_document_metadata(self, cache_path: Path, document_path: str):
+        """
+        文書のメタデータを保存
+        
+        Args:
+            cache_path: キャッシュディレクトリパス
+            document_path: 文書パス
+        """
+        metadata = {
+            "document_path": document_path,
+            "document_name": self._get_document_name(document_path),
+            "pages": len(self.documents),
+            "chunks": len(self.vectorstore.index_to_docstore_id) if self.vectorstore else 0,
+            "total_characters": sum(len(doc.page_content) for doc in self.documents)
+        }
+        
+        metadata_file = cache_path / "metadata.txt"
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            for key, value in metadata.items():
+                f.write(f"{key}: {value}\n")
+        
+        self.current_document_info = metadata
+    
+    def _load_document_metadata(self, cache_path: Path) -> dict:
+        """
+        文書のメタデータを読み込み
+        
+        Args:
+            cache_path: キャッシュディレクトリパス
+            
+        Returns:
+            文書メタデータ
+        """
+        metadata_file = cache_path / "metadata.txt"
+        if not metadata_file.exists():
+            return {}
+        
+        metadata = {}
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if ': ' in line:
+                    key, value = line.strip().split(': ', 1)
+                    # 数値の場合は変換
+                    if key in ['pages', 'chunks', 'total_characters']:
+                        metadata[key] = int(value)
+                    else:
+                        metadata[key] = value
+        
+        return metadata
     
     def load_document(self, document_path: str, doc_type: str = "auto") -> None:
         """
-        文書ファイルまたはURLを読み込み、ベクトルストアを構築
+        文書ファイルまたはURLを読み込み、ベクトルストアを構築（自動キャッシュ対応）
         
         Args:
             document_path: 文書ファイルのパスまたはURL
             doc_type: 文書タイプ ("auto", "pdf", "pptx", "docx", "web", "txt")
         """
+        # 文書名を取得
+        document_name = self._get_document_name(document_path)
+        
+        # キャッシュキーを生成
+        try:
+            cache_key = self._get_file_cache_key(document_path)
+            cache_path = self.cache_dir / cache_key
+            
+            # 既存キャッシュをチェック
+            if cache_path.exists() and (cache_path / "metadata.txt").exists():
+                # キャッシュから復元
+                logger.info(f"📂 キャッシュから復元中: {document_name}")
+                self.load_vectorstore(str(cache_path))
+                
+                # メタデータを読み込み
+                metadata = self._load_document_metadata(cache_path)
+                self.current_document_info = metadata
+                
+                # QAチェーンを初期化
+                self.qa_chain = RetrievalQA.from_chain_type(
+                    llm=self.llm,
+                    chain_type="stuff",
+                    retriever=self.vectorstore.as_retriever(
+                        search_kwargs={"k": 3}
+                    ),
+                    return_source_documents=True
+                )
+                
+                logger.info(f"✅ キャッシュ復元完了: {document_name}")
+                logger.info(f"   📊 ページ数: {metadata.get('pages', 0)}, チャンク数: {metadata.get('chunks', 0)}")
+                return
+                
+        except Exception as e:
+            logger.warning(f"キャッシュキー生成失敗: {e}")
+            # キャッシュが使えない場合は新規処理を続行
+        
+        # 新規ベクトル化処理
+        logger.info(f"📄 新規ベクトル化開始: {document_name}")
+        
         # 文書タイプの自動判定
         if doc_type == "auto":
             doc_type = self._detect_document_type(document_path)
@@ -150,7 +368,16 @@ class PDFRAGSystem:
             return_source_documents=True
         )
         
-        logger.info("RAGシステムの準備が完了しました")
+        # 自動キャッシュ保存
+        try:
+            self.save_vectorstore(str(cache_path))
+            self._save_document_metadata(cache_path, document_path)
+            logger.info(f"💾 キャッシュ保存完了: {document_name}")
+        except Exception as e:
+            logger.warning(f"キャッシュ保存失敗: {e}")
+        
+        logger.info(f"✅ 新規ベクトル化完了: {document_name}")
+        logger.info(f"   📊 ページ数: {len(self.documents)}, チャンク数: {len(texts)}")
     
     def _build_vectorstore_with_batches(self, texts: List[Document]) -> FAISS:
         """
@@ -165,7 +392,8 @@ class PDFRAGSystem:
         vectorstore = None
         total_batches = (len(texts) + self.batch_size - 1) // self.batch_size
         
-        logger.info(f"合計{len(texts)}チャンクを{total_batches}バッチで処理します")
+        logger.info(f"🔄 合計{len(texts)}チャンクを{total_batches}バッチで処理します")
+        logger.info(f"⚡ 最高速設定: {self.batch_size}チャンク/バッチ, {self.batch_delay}秒間隔")
         
         for i in tqdm(range(0, len(texts), self.batch_size), desc="埋め込み生成"):
             batch = texts[i:i + self.batch_size]
@@ -192,13 +420,46 @@ class PDFRAGSystem:
                 
                 # 最後のバッチでない場合は待機
                 if i + self.batch_size < len(texts):
-                    logger.info(f"レート制限回避のため{self.batch_delay}秒待機中...")
-                    time.sleep(self.batch_delay)
+                    current_delay = self.batch_delay
+                    
+                    # 最適設定確定後は固定値を使用
+                    if self.optimal_delay_found:
+                        current_delay = self.batch_delay
+                        logger.info(f"🎯 最適設定で継続: {current_delay:.1f}秒待機中")
+                    elif self.adaptive_mode and batch_num > 2 and not self.error_occurred:
+                        # 前回成功設定を記録してから最適化
+                        self.last_successful_delay = current_delay
+                        
+                        # エラー未発生時のみ最適化継続（大容量バッチモード）
+                        # 0.1秒で固定（大容量バッチでは遅延時間の最適化は不要）
+                        current_delay = 0.1  # 0.1秒固定
+                        
+                        logger.info(f"⚡ 最適化中: {current_delay:.1f}秒待機 (前回成功: {self.last_successful_delay:.1f}秒)")
+                    else:
+                        logger.info(f"⏰ 基本待機: {current_delay:.1f}秒")
+                    
+                    time.sleep(current_delay)
                     
             except Exception as e:
                 if "429" in str(e) or "Too Many Requests" in str(e):
-                    logger.warning(f"レート制限に達しました。{self.batch_delay * 2}秒待機後にリトライします...")
-                    time.sleep(self.batch_delay * 2)
+                    self.error_occurred = True
+                    
+                    # 前回成功設定があれば、バッチサイズを維持して遅延時間のみ戻す
+                    if self.last_successful_delay and not self.optimal_delay_found:
+                        self.batch_delay = self.last_successful_delay
+                        self.optimal_delay_found = True
+                        logger.warning(f"🎯 最適設定確定！バッチサイズ{self.batch_size}維持、遅延{self.batch_delay:.1f}秒で固定")
+                    else:
+                        # 前回成功設定がない場合の従来処理
+                        if self.adaptive_mode and self.batch_size > 2:
+                            old_batch_size = self.batch_size
+                            self.batch_size = max(self.batch_size - 2, 2)
+                            logger.warning(f"🚨 バッチサイズ縮小: {old_batch_size}→{self.batch_size}")
+                    
+                    wait_time = max(self.batch_delay * 3, 5.0)  # 最低5秒は待機
+                    logger.warning(f"⏸️  レート制限回復待機: {wait_time:.1f}秒...")
+                    time.sleep(wait_time)
+                    
                     # 同じバッチを再試行
                     i -= self.batch_size
                     continue
@@ -206,6 +467,21 @@ class PDFRAGSystem:
                     raise e
         
         return vectorstore
+    
+    def get_performance_info(self) -> dict:
+        """
+        現在の性能設定情報を取得
+        
+        Returns:
+            性能設定の詳細情報
+        """
+        return {
+            "performance_mode": self.performance_mode,
+            "batch_size": self.batch_size,
+            "batch_delay": self.batch_delay,
+            "adaptive_mode": self.adaptive_mode,
+            "estimated_time_per_100_chunks": (100 / self.batch_size) * self.batch_delay / 60  # 分
+        }
     
     def _detect_document_type(self, document_path: str) -> str:
         """
@@ -284,7 +560,7 @@ class PDFRAGSystem:
         """
         self.load_document(pdf_path, "pdf")
     
-    def add_document(self, document_path: str, doc_type: str = "auto") -> None:
+    def add_document(self, document_path: str, doc_type: str = "auto") -> dict:
         """
         既存のRAGシステムに新しい文書を追加
         
@@ -380,6 +656,10 @@ class PDFRAGSystem:
         Returns:
             文書情報の辞書
         """
+        # キャッシュされた情報がある場合はそれを使用
+        if self.current_document_info:
+            return self.current_document_info
+            
         if not self.documents:
             return {"status": "文書が読み込まれていません"}
         
@@ -413,7 +693,8 @@ class PDFRAGSystem:
         """
         self.vectorstore = FAISS.load_local(
             load_path, 
-            embeddings=self.embeddings
+            embeddings=self.embeddings,
+            allow_dangerous_deserialization=True  # 自分で作成したキャッシュファイルなので安全
         )
         
         # QAチェーンを再初期化
@@ -427,6 +708,51 @@ class PDFRAGSystem:
         )
         
         logger.info(f"ベクトルストアを読み込みました: {load_path}")
+    
+    def get_cache_info(self) -> dict:
+        """
+        キャッシュディレクトリの情報を取得
+        
+        Returns:
+            キャッシュ情報の辞書
+        """
+        if not self.cache_dir.exists():
+            return {"cache_count": 0, "cache_size": 0}
+        
+        cache_count = 0
+        cache_size = 0
+        
+        for cache_folder in self.cache_dir.iterdir():
+            if cache_folder.is_dir():
+                cache_count += 1
+                # フォルダサイズを計算
+                for file_path in cache_folder.rglob('*'):
+                    if file_path.is_file():
+                        cache_size += file_path.stat().st_size
+        
+        return {
+            "cache_count": cache_count,
+            "cache_size": cache_size,
+            "cache_size_mb": round(cache_size / (1024 * 1024), 2)
+        }
+    
+    def clear_cache(self) -> bool:
+        """
+        キャッシュディレクトリを削除
+        
+        Returns:
+            削除成功の可否
+        """
+        try:
+            import shutil
+            if self.cache_dir.exists():
+                shutil.rmtree(self.cache_dir)
+                self.cache_dir.mkdir(exist_ok=True)
+            logger.info("キャッシュが削除されました")
+            return True
+        except Exception as e:
+            logger.error(f"キャッシュ削除失敗: {e}")
+            return False
 
 
 def main():

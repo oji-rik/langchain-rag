@@ -63,7 +63,8 @@ def create_rag_tool(
     embedding_deployment: str,
     api_key: str,
     documentation_path: str,
-    api_version: str = "2024-12-01-preview"
+    api_version: str = "2024-12-01-preview",
+    performance_mode: str = "insane"
 ) -> DocumentationSearchTool:
     """
     RAGツールを作成し、指定されたドキュメントを事前読み込み
@@ -75,21 +76,21 @@ def create_rag_tool(
         api_key: Azure OpenAI APIキー
         documentation_path: 事前読み込みするドキュメントのパス
         api_version: Azure OpenAI APIバージョン
+        performance_mode: 性能モード ("safe", "balanced", "fast", "turbo")
     
     Returns:
         初期化済みRAGツール
     """
-    logger.info("RAGツールを初期化中...")
+    logger.info(f"RAGツールを初期化中（{performance_mode}モード）...")
     
-    # RAGシステムの初期化
+    # RAGシステムの初期化（性能モード適用）
     rag_system = PDFRAGSystem(
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
         embedding_deployment=embedding_deployment,
         api_key=api_key,
         api_version=api_version,
-        batch_size=3,      # より保守的な設定
-        batch_delay=10.0   # 10秒間隔
+        performance_mode=performance_mode
     )
     
     # ドキュメントの事前読み込み
@@ -121,16 +122,30 @@ class DocumentAddTool(BaseTool):
             if not self.rag_system:
                 return "RAGシステムが初期化されていません。"
             
-            if not self.rag_system.vectorstore:
-                return "ベースとなる文書が読み込まれていません。まず初期文書を読み込んでください。"
-            
             logger.info(f"DocumentAddTool で新しい文書を追加: {document_path}")
             
-            # 文書を追加
-            result = self.rag_system.add_document(document_path)
-            
-            # 結果を整形
-            response = f"""📄 文書追加完了!
+            # 文書を追加（初回の場合は load_document を使用）
+            if not self.rag_system.vectorstore:
+                # 初回文書読み込み
+                self.rag_system.load_document(document_path)
+                doc_info = self.rag_system.get_document_info()
+                
+                response = f"""📄 初回文書読み込み完了!
+                
+読み込んだ文書:
+- ページ/セクション数: {doc_info['pages']}
+- 総文字数: {doc_info['total_characters']:,}
+- チャンク数: {doc_info['chunks']}
+
+文書検索機能が利用可能になりました！"""
+                
+                return response
+            else:
+                # 追加文書読み込み
+                result = self.rag_system.add_document(document_path)
+                
+                # 結果を整形
+                response = f"""📄 文書追加完了!
             
 追加した文書:
 - ページ/セクション数: {result['added_pages']}
@@ -165,3 +180,62 @@ def create_document_add_tool(rag_system: PDFRAGSystem) -> DocumentAddTool:
         文書追加ツール
     """
     return DocumentAddTool(rag_system=rag_system)
+
+
+def create_empty_rag_system(
+    azure_endpoint: str,
+    azure_deployment: str,
+    embedding_deployment: str,
+    api_key: str,
+    api_version: str = "2024-12-01-preview",
+    performance_mode: str = "insane"
+) -> PDFRAGSystem:
+    """
+    空のRAGシステムを作成（後で文書追加用）
+    
+    Args:
+        azure_endpoint: Azure OpenAI エンドポイント
+        azure_deployment: チャット用デプロイメント名
+        embedding_deployment: 埋め込み用デプロイメント名
+        api_key: Azure OpenAI APIキー
+        api_version: Azure OpenAI APIバージョン
+        performance_mode: 性能モード ("safe", "balanced", "fast", "turbo")
+        
+    Returns:
+        初期化済みの空のRAGシステム
+    """
+    logger.info(f"空のRAGシステムを初期化中（{performance_mode}モード）...")
+    
+    return PDFRAGSystem(
+        azure_endpoint=azure_endpoint,
+        azure_deployment=azure_deployment,
+        embedding_deployment=embedding_deployment,
+        api_key=api_key,
+        api_version=api_version,
+        performance_mode=performance_mode
+    )
+
+
+def get_performance_info(rag_system: PDFRAGSystem) -> str:
+    """
+    RAGシステムの性能設定情報を取得
+    
+    Args:
+        rag_system: RAGシステムインスタンス
+        
+    Returns:
+        性能情報の文字列
+    """
+    if not rag_system:
+        return "RAGシステムが初期化されていません"
+    
+    info = rag_system.get_performance_info()
+    
+    estimated_time = info.get('estimated_time_per_100_chunks', 0)
+    
+    return f"""📊 性能設定情報:
+- モード: {info['performance_mode']}
+- バッチサイズ: {info['batch_size']}
+- 遅延時間: {info['batch_delay']}秒
+- 適応モード: {'有効' if info['adaptive_mode'] else '無効'}
+- 100チャンクあたりの推定時間: {estimated_time:.1f}分"""

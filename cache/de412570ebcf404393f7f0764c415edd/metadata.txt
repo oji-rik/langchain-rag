@@ -1,0 +1,5 @@
+document_path: C:\Users\weida\source\repos\langchain+rag\kubota_thesis.pdf
+document_name: kubota_thesis.pdf
+pages: 240
+chunks: 598
+total_characters: 424865
